@@ -1,329 +1,47 @@
 <?php
 declare(strict_types=1);
-
-function envOrDefault(string $name, string $default): string
-{
-    $value = getenv($name);
-
-    return $value === false || $value === '' ? $default : $value;
-}
-
-function safeValue(array $source, string $key, string $default = ''): string
-{
-    $value = $source[$key] ?? $default;
-
-    return is_string($value) ? trim($value) : $default;
-}
-
-function columnExists(array $columns, string $name): bool
-{
-    return in_array($name, $columns, true);
-}
-
-function detectColumns(PDO $pdo, string $table): array
-{
-    $stmt = $pdo->query(sprintf('SHOW COLUMNS FROM `%s`', str_replace('`', '', $table)));
-    if (!$stmt) {
-        return [];
-    }
-
-    $columns = [];
-    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $column) {
-        if (isset($column['Field']) && is_string($column['Field'])) {
-            $columns[] = $column['Field'];
-        }
-    }
-
-    return $columns;
-}
-
-function toFloat(mixed $value): float
-{
-    return is_numeric($value) ? (float) $value : 0.0;
-}
-
-function toInt(mixed $value): int
-{
-    return is_numeric($value) ? (int) $value : 0;
-}
-
-function scoreOption(array $row, array $columns, string $destination, float $budget, int $travelers, int $days, array $interestTokens): float
-{
-    $score = 0.0;
-
-    if ($destination !== '') {
-        $target = strtolower($destination);
-        $destinationFields = array_filter([
-            columnExists($columns, 'destination') ? (string) ($row['destination'] ?? '') : '',
-            columnExists($columns, 'city') ? (string) ($row['city'] ?? '') : '',
-            columnExists($columns, 'country') ? (string) ($row['country'] ?? '') : '',
-            columnExists($columns, 'title') ? (string) ($row['title'] ?? '') : '',
-        ]);
-
-        foreach ($destinationFields as $field) {
-            $fieldLower = strtolower($field);
-            if ($fieldLower === $target) {
-                $score += 40;
-                break;
-            }
-
-            if (str_contains($fieldLower, $target)) {
-                $score += 30;
-                break;
-            }
-        }
-    }
-
-    $price = columnExists($columns, 'price') ? toFloat($row['price'] ?? 0) : 0.0;
-    if ($budget > 0 && $price > 0) {
-        $budgetGap = abs($budget - $price);
-        $score += max(0, 35 - ($budgetGap / max(1, $budget)) * 35);
-
-        if ($price <= $budget) {
-            $score += 10;
-        }
-    }
-
-    if ($travelers > 0 && columnExists($columns, 'max_people')) {
-        $maxPeople = toInt($row['max_people'] ?? 0);
-        if ($maxPeople >= $travelers) {
-            $score += 10;
-        }
-    }
-
-    if ($days > 0) {
-        if (columnExists($columns, 'days')) {
-            $packageDays = toInt($row['days'] ?? 0);
-            if ($packageDays > 0) {
-                $dayGap = abs($days - $packageDays);
-                $score += max(0, 10 - $dayGap * 2);
-            }
-        } elseif (columnExists($columns, 'nights')) {
-            $packageDays = toInt($row['nights'] ?? 0) + 1;
-            $dayGap = abs($days - $packageDays);
-            $score += max(0, 10 - $dayGap * 2);
-        }
-    }
-
-    if ($interestTokens !== []) {
-        $interestFields = array_filter([
-            columnExists($columns, 'tags') ? (string) ($row['tags'] ?? '') : '',
-            columnExists($columns, 'category') ? (string) ($row['category'] ?? '') : '',
-            columnExists($columns, 'description') ? (string) ($row['description'] ?? '') : '',
-            columnExists($columns, 'title') ? (string) ($row['title'] ?? '') : '',
-        ]);
-
-        if ($interestFields !== []) {
-            $combined = strtolower(implode(' ', $interestFields));
-            foreach ($interestTokens as $token) {
-                if ($token !== '' && str_contains($combined, $token)) {
-                    $score += 6;
-                }
-            }
-        }
-    }
-
-    if (columnExists($columns, 'rating')) {
-        $rating = toFloat($row['rating'] ?? 0);
-        if ($rating > 0) {
-            $score += min(5, $rating);
-        }
-    }
-
-    return round($score, 2);
-}
-
-function getDisplayName(array $row, array $columns): string
-{
-    $candidates = ['name', 'title', 'package_name', 'destination'];
-    foreach ($candidates as $key) {
-        if (columnExists($columns, $key) && isset($row[$key]) && $row[$key] !== '') {
-            return (string) $row[$key];
-        }
-    }
-
-    return 'Travel Option';
-}
-
-$destination = safeValue($_POST, 'destination');
-$budget = max(0.0, (float) safeValue($_POST, 'budget', '0'));
-$travelers = max(0, (int) safeValue($_POST, 'travelers', '0'));
-$days = max(0, (int) safeValue($_POST, 'days', '0'));
-$interests = safeValue($_POST, 'interests');
-$interestTokens = array_values(array_filter(array_map(
-    static fn(string $token): string => strtolower(trim($token)),
-    preg_split('/[\s,]+/', $interests) ?: []
-)));
-
-$results = [];
-$errors = [];
-$searched = $_SERVER['REQUEST_METHOD'] === 'POST';
-
-if ($searched) {
-    try {
-        $dbHost = envOrDefault('DB_HOST', '127.0.0.1');
-        $dbName = envOrDefault('DB_NAME', 'goglobal');
-        $dbUser = envOrDefault('DB_USER', 'root');
-        $dbPass = envOrDefault('DB_PASS', '');
-        $dbPort = envOrDefault('DB_PORT', '3306');
-        $dbTable = envOrDefault('DB_TABLE', 'packages');
-
-        $pdo = new PDO(
-            sprintf('mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4', $dbHost, $dbPort, $dbName),
-            $dbUser,
-            $dbPass,
-            [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            ]
-        );
-
-        $columns = detectColumns($pdo, $dbTable);
-        if ($columns === []) {
-            throw new RuntimeException('No columns found in configured table.');
-        }
-
-        $selectColumns = array_values(array_intersect(
-            ['id', 'name', 'title', 'package_name', 'destination', 'city', 'country', 'description', 'price', 'currency', 'days', 'nights', 'max_people', 'rating', 'tags', 'category'],
-            $columns
-        ));
-
-        if ($selectColumns === []) {
-            $selectColumns = ['*'];
-        }
-
-        $where = [];
-        $params = [];
-
-        if ($destination !== '') {
-            $searchableColumns = array_values(array_intersect(['destination', 'city', 'country', 'title', 'name'], $columns));
-            if ($searchableColumns !== []) {
-                $segments = [];
-                foreach ($searchableColumns as $idx => $col) {
-                    $key = ':destination' . $idx;
-                    $segments[] = sprintf('`%s` LIKE %s', $col, $key);
-                    $params[$key] = '%' . $destination . '%';
-                }
-                $where[] = '(' . implode(' OR ', $segments) . ')';
-            }
-        }
-
-        if ($budget > 0 && columnExists($columns, 'price')) {
-            $where[] = '`price` <= :max_budget';
-            $params[':max_budget'] = $budget * 1.4;
-        }
-
-        $sql = sprintf('SELECT %s FROM `%s`', implode(', ', array_map(static fn(string $col): string => $col === '*' ? '*' : '`' . $col . '`', $selectColumns)), str_replace('`', '', $dbTable));
-        if ($where !== []) {
-            $sql .= ' WHERE ' . implode(' AND ', $where);
-        }
-
-        if (columnExists($columns, 'rating')) {
-            $sql .= ' ORDER BY `rating` DESC';
-        } elseif (columnExists($columns, 'price')) {
-            $sql .= ' ORDER BY `price` ASC';
-        }
-
-        $sql .= ' LIMIT 80';
-
-        $stmt = $pdo->prepare($sql);
-        foreach ($params as $key => $value) {
-            $stmt->bindValue($key, $value);
-        }
-        $stmt->execute();
-
-        $rows = $stmt->fetchAll();
-        foreach ($rows as $row) {
-            $row['_score'] = scoreOption($row, $columns, $destination, $budget, $travelers, $days, $interestTokens);
-            $results[] = $row;
-        }
-
-        usort($results, static fn(array $a, array $b): int => ($b['_score'] <=> $a['_score']));
-        $results = array_slice($results, 0, 5);
-    } catch (Throwable $exception) {
-        $errors[] = 'Unable to fetch travel recommendations. Please verify your database settings and table schema.';
-    }
-}
-?>
-<!doctype html>
+?><!doctype html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>GoGlobal AI Travel Bot</title>
-    <style>
-        :root { color-scheme: light dark; }
-        body { font-family: Arial, sans-serif; margin: 2rem auto; max-width: 880px; padding: 0 1rem; }
-        form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-        form label { display: grid; gap: 6px; font-size: 0.95rem; }
-        form textarea, form input, button { padding: 10px; font: inherit; }
-        form .full { grid-column: 1 / -1; }
-        button { cursor: pointer; }
-        .card { border: 1px solid #bbb; border-radius: 8px; padding: 12px; margin-top: 12px; }
-        .best { border-color: #2ca58d; box-shadow: 0 0 0 1px #2ca58d inset; }
-        .error { color: #c53030; margin-top: 10px; }
-        .muted { opacity: 0.8; }
-    </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0B1B3D">
+    <title>GoGlobal AI Travel Assistant</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { theme: { extend: { colors: { navy: '#0B1B3D', crimson: '#E50914', gold: '#F59E0B' } } } };</script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="assets/css/style.css">
 </head>
 <body>
-    <h1>GoGlobal AI Travel Bot</h1>
-    <p class="muted">Tell the bot where you want to go, budget, and preferences. It ranks the best package and provides alternatives.</p>
-
-    <form method="post">
-        <label>
-            Where to go?
-            <input type="text" name="destination" value="<?= htmlspecialchars($destination, ENT_QUOTES, 'UTF-8') ?>" placeholder="e.g. Istanbul">
-        </label>
-        <label>
-            Budget (PKR)
-            <input type="number" name="budget" min="0" step="1000" value="<?= htmlspecialchars((string) ($budget > 0 ? $budget : ''), ENT_QUOTES, 'UTF-8') ?>" placeholder="e.g. 250000">
-        </label>
-        <label>
-            Travelers
-            <input type="number" name="travelers" min="1" value="<?= htmlspecialchars((string) ($travelers > 0 ? $travelers : ''), ENT_QUOTES, 'UTF-8') ?>" placeholder="e.g. 2">
-        </label>
-        <label>
-            Days
-            <input type="number" name="days" min="1" value="<?= htmlspecialchars((string) ($days > 0 ? $days : ''), ENT_QUOTES, 'UTF-8') ?>" placeholder="e.g. 5">
-        </label>
-        <label class="full">
-            Interests (comma or space separated)
-            <textarea class="full" name="interests" rows="3" placeholder="e.g. beach, family, shopping"><?= htmlspecialchars($interests, ENT_QUOTES, 'UTF-8') ?></textarea>
-        </label>
-        <button class="full" type="submit">Get AI Recommendation</button>
-    </form>
-
-    <?php foreach ($errors as $error): ?>
-        <p class="error"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></p>
-    <?php endforeach; ?>
-
-    <?php if ($searched && $errors === []): ?>
-        <h2>Recommendations</h2>
-        <?php if ($results === []): ?>
-            <p>No matching options found. Try widening budget or destination preferences.</p>
-        <?php endif; ?>
-
-        <?php foreach ($results as $index => $item): ?>
-            <section class="card <?= $index === 0 ? 'best' : '' ?>">
-                <h3>
-                    <?= $index === 0 ? 'Best Match: ' : 'Alternative: ' ?>
-                    <?= htmlspecialchars(getDisplayName($item, array_keys($item)), ENT_QUOTES, 'UTF-8') ?>
-                </h3>
-                <?php if (isset($item['destination'])): ?>
-                    <p><strong>Destination:</strong> <?= htmlspecialchars((string) $item['destination'], ENT_QUOTES, 'UTF-8') ?></p>
-                <?php endif; ?>
-                <?php if (isset($item['price'])): ?>
-                    <p><strong>Price:</strong> <?= htmlspecialchars((string) $item['price'], ENT_QUOTES, 'UTF-8') ?> <?= isset($item['currency']) ? htmlspecialchars((string) $item['currency'], ENT_QUOTES, 'UTF-8') : 'PKR' ?></p>
-                <?php endif; ?>
-                <?php if (isset($item['days']) || isset($item['nights'])): ?>
-                    <p><strong>Duration:</strong> <?= htmlspecialchars((string) ($item['days'] ?? ((int) $item['nights'] + 1)), ENT_QUOTES, 'UTF-8') ?> days</p>
-                <?php endif; ?>
-                <?php if (isset($item['description']) && trim((string) $item['description']) !== ''): ?>
-                    <p><?= htmlspecialchars((string) $item['description'], ENT_QUOTES, 'UTF-8') ?></p>
-                <?php endif; ?>
-                <p><strong>AI score:</strong> <?= htmlspecialchars((string) ($item['_score'] ?? 0), ENT_QUOTES, 'UTF-8') ?></p>
-            </section>
-        <?php endforeach; ?>
-    <?php endif; ?>
+<div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+        <div class="brand-lockup"><span class="brand-mark">GG</span><span>GoGlobal</span><small>TRAVEL AI</small></div>
+        <button class="new-chat" id="newChat"><span>＋</span> New trip plan</button>
+        <div class="sidebar-section"><p class="section-label">Popular escapes</p>
+            <button class="destination-link" data-prompt="Build me a Dubai Elevated Escape"><span>✦</span> Dubai</button>
+            <button class="destination-link" data-prompt="Show me Baku packages"><span>✦</span> Baku</button>
+            <button class="destination-link" data-prompt="I want the 21 Days Economy Umrah"><span>✦</span> Umrah 21 Days</button>
+            <button class="destination-link" data-prompt="Plan the Thailand Emerald Trio"><span>✦</span> Thailand Emerald Trio</button>
+            <button class="destination-link" data-prompt="Show Turkey Highlights"><span>✦</span> Turkey Highlights</button>
+        </div>
+        <div class="sidebar-section history-section"><p class="section-label">Your sessions</p><div id="sessionList"></div></div>
+        <div class="sidebar-footer"><span class="status-dot"></span><span>Concierge online</span><button id="clearSessions" title="Clear saved sessions">⌫</button></div>
+    </aside>
+    <main class="main-panel">
+        <header class="topbar"><button class="mobile-menu" id="mobileMenu" aria-label="Open menu">☰</button><div><p class="topbar-kicker">GoGlobal / Intelligent planning desk</p><h1>Travel, made personal.</h1></div><div class="topbar-actions"><span class="secure-pill">● Local catalogue</span><button class="icon-button" id="resetConversation" title="Start a new conversation">↻</button></div></header>
+        <section class="chat-canvas" id="chatCanvas">
+            <div class="welcome-block" id="welcomeBlock"><div class="ai-orbit"><span>GG</span><i></i></div><p class="eyebrow">Your GoGlobal concierge</p><h2>Where will your<br><em>next story</em> begin?</h2><p class="welcome-copy">Tell me what you have in mind. I’ll match flights, stays, meals and moments to your budget.</p></div>
+            <div class="message-stream" id="messageStream"></div>
+            <div class="composer-area"><div class="prompt-chips" id="promptChips"><button data-prompt="Show me Umrah packages">🕋 Umrah packages</button><button data-prompt="Search flights">✈ Search flights</button><button data-prompt="Explore hotels">⌂ Explore hotels</button><button data-prompt="Show tour packages">✦ Tour packages</button></div><form class="composer" id="chatForm"><button class="composer-tool" type="button" id="voiceButton" title="Voice input">◉</button><input id="messageInput" autocomplete="off" placeholder="Ask anything about your next journey..." aria-label="Message GoGlobal AI"><button class="send-button" type="submit" aria-label="Send message">➜</button></form><p class="composer-note">GoGlobal AI works from our curated local catalogue. Prices are per traveller unless noted.</p></div>
+        </section>
+    </main>
+    <aside class="insight-panel"><div class="insight-head"><div><p class="eyebrow">Live catalogue</p><h2>Trip building blocks</h2></div><span class="catalog-count" id="catalogCount">200+</span></div><div class="filter-strip"><button class="filter-tab active" data-filter="all">All</button><button class="filter-tab" data-filter="flights">Flights</button><button class="filter-tab" data-filter="hotels">Hotels</button><button class="filter-tab" data-filter="tours">Tours</button></div><div class="catalog-list" id="catalogList"></div></aside>
+</div>
+<div class="modal-backdrop hidden" id="choiceModal"><div class="modal-sheet"><div class="modal-heading"><div><p class="eyebrow" id="modalEyebrow">GoGlobal choices</p><h2 id="modalTitle">Choose an option</h2></div><button class="modal-close" data-close-modal>×</button></div><div id="modalContent"></div></div></div>
+<div class="modal-backdrop hidden" id="bookingModal"><div class="modal-sheet booking-sheet"><div class="modal-heading"><div><p class="eyebrow">One step from takeoff</p><h2>Confirm your trip</h2></div><button class="modal-close" data-close-modal>×</button></div><div id="bookingSummary"></div><form id="bookingForm" class="booking-form"><label>Full name<input name="name" required placeholder="Your full name"></label><label>WhatsApp number<input name="whatsapp" required placeholder="+92 300 0000000"></label><label>Departure date<input name="date" type="date" required></label><label>Special instructions<textarea name="notes" rows="3" placeholder="Room preference, airport assistance..."></textarea></label><button class="primary-action" type="submit">Send booking request <span>→</span></button></form></div></div>
+<div class="toast hidden" id="toast"></div>
+<script src="assets/js/app.js"></script>
 </body>
 </html>
