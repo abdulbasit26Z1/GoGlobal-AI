@@ -1,6 +1,4 @@
-<?php
-declare(strict_types=1);
-?><!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -12,7 +10,7 @@ declare(strict_types=1);
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/css/style.css">
+    <link rel="stylesheet" href="/assets/css/style.css">
 </head>
 <body>
 <div class="app-shell">
@@ -42,6 +40,6 @@ declare(strict_types=1);
 <div class="modal-backdrop hidden" id="choiceModal"><div class="modal-sheet"><div class="modal-heading"><div><p class="eyebrow" id="modalEyebrow">GoGlobal choices</p><h2 id="modalTitle">Choose an option</h2></div><button class="modal-close" data-close-modal>×</button></div><div id="modalContent"></div></div></div>
 <div class="modal-backdrop hidden" id="bookingModal"><div class="modal-sheet booking-sheet"><div class="modal-heading"><div><p class="eyebrow">One step from takeoff</p><h2>Confirm your trip</h2></div><button class="modal-close" data-close-modal>×</button></div><div id="bookingSummary"></div><form id="bookingForm" class="booking-form"><label>Full name<input name="name" required placeholder="Your full name"></label><label>WhatsApp number<input name="whatsapp" required placeholder="+92 300 0000000"></label><label>Departure date<input name="date" type="date" required></label><label>Special instructions<textarea name="notes" rows="3" placeholder="Room preference, airport assistance..."></textarea></label><button class="primary-action" type="submit">Send booking request <span>→</span></button></form></div></div>
 <div class="toast hidden" id="toast"></div>
-<script src="assets/js/app.js"></script>
+<script src="/assets/js/app.js"></script>
 </body>
 </html>
