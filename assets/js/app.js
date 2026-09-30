@@ -5,14 +5,40 @@
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
   const sessionTitle = (value) => value.replace(/^(show me|build me|i want|plan|search|explore)\s+/i, '').slice(0, 26);
 
+  const getApiEndpoint = () => {
+    const path = window.location.pathname;
+    if (path.endsWith('/api/') || path.endsWith('/api/index.php')) {
+      return 'api.php';
+    }
+    return '/api/api.php';
+  };
+
   async function request(payload) {
-    const response = await fetch('api.php', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-    const data = await response.json();
+    const endpoint = getApiEndpoint();
+    const response = await fetch(endpoint, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+    const text = await response.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      throw new Error('API returned invalid JSON response. Please check endpoint routing.');
+    }
     if (!response.ok || !data.ok) throw new Error(data.error || 'The concierge could not respond.');
     return data;
   }
   async function loadCatalogue() {
-    const response = await fetch('api.php'); state.catalogue = (await response.json()).catalogue || {};
+    const endpoint = getApiEndpoint();
+    const response = await fetch(endpoint);
+    const text = await response.text();
+    let data = {};
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      console.error('Failed to parse catalogue response:', text);
+      showToast('Catalogue could not be loaded.');
+      return;
+    }
+    state.catalogue = data.catalogue || {};
     $('#catalogCount').textContent = `${Object.values(state.catalogue).reduce((total, list) => total + list.length, 0)} items`;
     renderCatalog('all');
   }

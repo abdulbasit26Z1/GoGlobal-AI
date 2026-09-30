@@ -1,9 +1,17 @@
 <?php
 declare(strict_types=1);
+ini_set('display_errors', '0');
+error_reporting(E_ALL);
 header('Content-Type: application/json; charset=utf-8');
 
 function respond(array $payload, int $status = 200): never { http_response_code($status); echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); exit; }
-function catalogue(): array { $data = json_decode((string) file_get_contents(__DIR__ . '/db.json'), true); return is_array($data) ? $data : []; }
+function catalogue(): array {
+    $file = __DIR__ . '/db.json';
+    if (!is_file($file)) return [];
+    $raw = @file_get_contents($file);
+    $data = $raw !== false ? json_decode($raw, true) : null;
+    return is_array($data) ? $data : [];
+}
 function input(): array { $raw = file_get_contents('php://input'); $data = json_decode($raw ?: '', true); return is_array($data) ? $data : $_POST; }
 function money(mixed $value): int { preg_match('/[0-9][0-9,]*/', (string) $value, $match); return isset($match[0]) ? (int) str_replace(',', '', $match[0]) : 0; }
 function clean(string $value): string { return trim($value); }
